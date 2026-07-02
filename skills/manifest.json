@@ -1,0 +1,20 @@
+{
+  "skills": [
+    {
+      "name": "computer-use",
+      "path": "computer-use/SKILL.md"
+    },
+    {
+      "name": "dogfood",
+      "path": "dogfood/SKILL.md"
+    },
+    {
+      "name": "retrieval-reflex",
+      "path": "retrieval-reflex/SKILL.md"
+    },
+    {
+      "name": "yuanbao",
+      "path": "yuanbao/SKILL.md"
+    }
+  ]
+}

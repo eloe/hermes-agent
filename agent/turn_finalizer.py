@@ -522,6 +522,18 @@ def finalize_turn(
     except Exception as exc:
         logger.warning("on_turn_complete notification failed: %s", exc)
 
+    # Queue evidence references for review; never write transcripts into GBrain.
+    if final_response and not interrupted:
+        try:
+            from agent.gbrain_promotion_candidates import observe_turn
+            observe_turn(
+                session_id=agent.session_id, turn_id=turn_id,
+                user_message=original_user_message, assistant_response=final_response,
+                platform=_platform,
+            )
+        except Exception as exc:
+            logger.debug("gbrain promotion candidate observer failed: %s", exc)
+
     # Surrogate chokepoint: RAW SDK text with a lone UTF-16 surrogate crashes downstream
     # consumers (stdout, Telegram ``utf16_len``, JSON); scrub once where it leaves the loop.
     # Class-level surrogate chokepoint (#80366, #55143, #55309, #19819): ``final_response`` is often the RAW

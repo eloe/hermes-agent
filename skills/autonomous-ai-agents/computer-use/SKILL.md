@@ -5,6 +5,10 @@ version: 2.0.0
 author: Francesco Bonacci (f-trycua), Hermes Agent
 license: MIT
 platforms: [macos, windows, linux]
+triggers:
+  - computer use
+  - control the desktop
+  - use the screen
 metadata:
   hermes:
     tags: [computer-use, desktop, automation, gui, cross-platform]

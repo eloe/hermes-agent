@@ -5,6 +5,10 @@ version: 1.0.0
 author: Teknium (teknium1), Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
+triggers:
+  - dogfood hermes
+  - test hermes against itself
+  - use hermes dogfood checks
 metadata:
   hermes:
     tags: [qa, testing, browser, web, dogfood]
