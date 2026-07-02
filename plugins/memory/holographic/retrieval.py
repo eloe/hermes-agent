@@ -3,10 +3,14 @@ Jaccard similarity and HRR vector similarity, trust-weighted (ported from KIK me
 
 from __future__ import annotations
 
+import logging
 import math
+import re
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .store import MemoryStore
@@ -52,13 +56,16 @@ class FactRetriever:
     def search(self, query: str, category: str | None = None, min_trust: float = 0.3, limit: int = 10) -> list[dict]:
         """FTS5 candidates (limit*3) → Jaccard + HRR rerank → trust weighting → optional temporal decay
         0.5^(age_days / half_life). Returns fact dicts with 'score', sorted desc."""
-        candidates = self._fts_candidates(query, category, min_trust, limit * 3)
+        identifiers = self._identifier_tokens(query)
+        candidate_limit = max(limit * 3, min(500, max(200, limit * 10))) if identifiers else limit * 3
+        candidates = self._fts_candidates(query, category, min_trust, candidate_limit)
         query_tokens = self._tokenize(query)
         # Query vector is loop-invariant; encode lazily on the first candidate that carries an HRR vector
         # so stores whose hrr_vector was never backfilled don't pay for it.
         query_vec = None
         for fact in candidates:
             jaccard = self._jaccard_similarity(query_tokens, self._tokenize(fact["content"]) | self._tokenize(fact.get("tags", "")))
+            fact["_identifier_hit"] = bool(identifiers & (self._identifier_tokens(fact["content"]) | self._identifier_tokens(fact.get("tags", ""))))
             hrr_sim = 0.5  # neutral
             if self.hrr_weight > 0 and fact.get("hrr_vector"):
                 fact_vec = self._phases(fact["hrr_vector"])
@@ -66,12 +73,24 @@ class FactRetriever:
                     query_vec = hrr.encode_text(query, self.hrr_dim)
                 hrr_sim = _shift(hrr.similarity(query_vec, fact_vec))
             relevance = self.fts_weight * fact.get("fts_rank", 0.0) + self.jaccard_weight * jaccard + self.hrr_weight * hrr_sim
+            relevance += 0.65 if fact["_identifier_hit"] else 0.0
             fact["score"] = relevance * fact["trust_score"]
             if self.half_life > 0:
                 fact["score"] *= self._temporal_decay(fact.get("updated_at") or fact.get("created_at"))
-        results = sorted(candidates, key=lambda x: x["score"], reverse=True)[:limit]
+        results = sorted(candidates, key=lambda x: (x["_identifier_hit"], x["score"]), reverse=True)[:limit]
+        if results:
+            try:
+                ids = [r["fact_id"] for r in results]
+                placeholders = ",".join("?" * len(ids))
+                self.store._conn.execute(f"UPDATE facts SET retrieval_count = retrieval_count + 1 WHERE fact_id IN ({placeholders})", ids)
+                self.store._conn.commit()
+                for fact in results:
+                    fact["retrieval_count"] = fact.get("retrieval_count", 0) + 1
+            except Exception:
+                logger.debug("Failed to increment retrieval_count", exc_info=True)
         for fact in results:
             fact.pop("hrr_vector", None)  # callers expect JSON-serializable dicts
+            fact.pop("_identifier_hit", None)
         return results
 
     def _vector_query(self, fallback: str, category: str | None, limit: int, sim_fn: Callable) -> list[dict]:
@@ -197,6 +216,22 @@ class FactRetriever:
         tokens = [f'"{c}"' for c in (raw.strip(_PUNCT).translate(_FTS_OPERATORS) for raw in query.lower().split())
                   if len(c) >= 2 and c not in _FTS_STOPWORDS]
         return " OR ".join(tokens) if tokens else query
+
+    @staticmethod
+    def _identifier_tokens(text: str) -> set[str]:
+        """Extract structured identifiers that should dominate recall ranking."""
+        if not text:
+            return set()
+        identifiers = set()
+        for raw in re.findall(r"[a-z0-9_][a-z0-9_.:-]*[a-z0-9_]", text.lower()):
+            token = raw.strip(".,;:!?\"'()[]{}#@<>`")
+            if len(token) < 4:
+                continue
+            if re.fullmatch(r"slot\d+", token):
+                continue
+            if any(ch.isdigit() for ch in token) or any(sep in token for sep in ("-", "_", ":", ".")):
+                identifiers.add(token)
+        return identifiers
 
     @staticmethod
     def _jaccard_similarity(set_a: set, set_b: set) -> float:

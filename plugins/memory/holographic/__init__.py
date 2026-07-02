@@ -31,6 +31,7 @@ FACT_STORE_SCHEMA = {
         "• probe — Entity recall: ALL facts about a person/thing.\n• related — What connects to an entity? Structural adjacency.\n"
         "• reason — Compositional: facts connected to MULTIPLE entities simultaneously.\n"
         "• contradict — Memory hygiene: find facts making conflicting claims.\n• update/remove/list — CRUD operations.\n\n"
+        "PROMOTION TAGS: use promoted_to_gbrain, transient, and do_not_promote lifecycle tags.\n\n"
         "IMPORTANT: Before answering questions about the user, ALWAYS probe or reason first."
     ),
     "parameters": {
@@ -66,11 +67,11 @@ FACT_FEEDBACK_SCHEMA = {
 
 # Auto-extraction (on_session_end): (patterns, category) — user preferences -> user_pref, decisions -> project.
 _EXTRACT_CATEGORIES = (
-    ([re.compile(r'\bI\s+(?:prefer|like|love|use|want|need)\s+(.+)', re.IGNORECASE),
-      re.compile(r'\bmy\s+(?:favorite|preferred|default)\s+\w+\s+is\s+(.+)', re.IGNORECASE),
-      re.compile(r'\bI\s+(?:always|never|usually)\s+(.+)', re.IGNORECASE)], "user_pref"),
-    ([re.compile(r'\bwe\s+(?:decided|agreed|chose)\s+(?:to\s+)?(.+)', re.IGNORECASE),
-      re.compile(r'\bthe\s+project\s+(?:uses|needs|requires)\s+(.+)', re.IGNORECASE)], "project"),
+    (re.compile(r'\bI\s+prefer\s+(.+?)(?:\s+(?:over|instead of|rather than)\s+(.+?))?(?:\.|!|$)', re.IGNORECASE), "user_pref", "prefers {0}"),
+    (re.compile(r'\bI\s+(always|never|usually)\s+(.+?)(?:\.|!|$)', re.IGNORECASE), "user_pref", "{0} {1}"),
+    (re.compile(r'\bmy\s+(?:favorite|preferred|default)\s+(\w+)\s+is\s+(.+?)(?:\.|!|$)', re.IGNORECASE), "user_pref", "preferred {0} is {1}"),
+    (re.compile(r'\bwe\s+(?:decided|agreed|chose)\s+(?:to\s+)?(.+?)(?:\.|!|$)', re.IGNORECASE), "project", "decided to {0}"),
+    (re.compile(r'\bthe\s+project\s+(?:uses|needs|requires)\s+(.+?)(?:\.|!|$)', re.IGNORECASE), "project", "project requires {0}"),
 )
 
 
@@ -103,6 +104,7 @@ class HolographicMemoryProvider(MemoryProvider):
         self._config = config or _load_plugin_config()
         self._store = self._retriever = None
         self._min_trust = float(self._config.get("min_trust_threshold", 0.3))
+        self._prefetch_limit = max(1, min(20, int(self._config.get("prefetch_limit", 10))))
 
     @property
     def name(self) -> str:
@@ -131,6 +133,7 @@ class HolographicMemoryProvider(MemoryProvider):
             {"key": "auto_extract", "description": "Auto-extract facts at session end", "default": "false", "choices": ["true", "false"]},
             {"key": "default_trust", "description": "Default trust score for new facts", "default": "0.5"},
             {"key": "hrr_dim", "description": "HRR vector dimensions", "default": "1024"},
+            {"key": "prefetch_limit", "description": "Maximum facts to prefetch before a turn", "default": "10"},
         ]
 
     def initialize(self, session_id: str, **kwargs) -> None:
@@ -145,6 +148,20 @@ class HolographicMemoryProvider(MemoryProvider):
                                         temporal_decay_half_life=int(self._config.get("temporal_decay_half_life", 0)))
         self._session_id = session_id
 
+        # Warn if numpy is missing — HRR operations silently disabled (#17350)
+        try:
+            from . import holographic as _hrr
+            self._hrr_available = _hrr._HAS_NUMPY
+        except ImportError:
+            self._hrr_available = False
+
+        if not self._hrr_available:
+            logger.warning(
+                "Holographic memory: numpy not found. HRR vector operations disabled. "
+                "Only FTS5 keyword search will be available. "
+                "Install numpy to enable compositional retrieval (probe/reason/contradict)."
+            )
+
     def system_prompt_block(self) -> str:
         if not self._store:
             return ""
@@ -157,18 +174,24 @@ class HolographicMemoryProvider(MemoryProvider):
                 if total == 0 else
                 f"Active. {total} facts stored with entity resolution and trust scoring.\n"
                 "Use fact_store to search, probe entities, reason across entities, or add facts.\n")
-        return "# Holographic Memory\n" + body + "Use fact_feedback to rate facts after using them (trains trust scores)."
+        status = "" if self._hrr_available else "\nWARNING: numpy not installed — HRR vector operations disabled; only keyword search works."
+        return "# Holographic Memory\n" + body + "Use fact_feedback to rate facts after using them (trains trust scores)." + status
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if not self._retriever or not query:
             return ""
         try:
-            results = self._retriever.search(query, min_trust=self._min_trust, limit=5)
+            results = self._retriever.search(query, min_trust=self._min_trust, limit=self._prefetch_limit)
             lines = [f"- [{r.get('trust_score', r.get('trust', 0)):.1f}] {r.get('content', '')}" for r in results]
             return "## Holographic Memory\n" + "\n".join(lines) if results else ""
         except Exception as e:
             logger.debug("Holographic prefetch failed: %s", e)
             return ""
+
+    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+        # Long-lived messaging sessions need facts available before session shutdown.
+        if is_truthy_value(self._config.get("auto_extract", False)) and self._store and user_content:
+            self._auto_extract_facts([{"role": "user", "content": user_content}])
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [FACT_STORE_SCHEMA, FACT_FEEDBACK_SCHEMA]
@@ -249,13 +272,19 @@ class HolographicMemoryProvider(MemoryProvider):
                 continue
             if not isinstance(content, str) or len(content) < 10:
                 continue
-            for patterns, category in _EXTRACT_CATEGORIES:
-                if any(p.search(content) for p in patterns):
+            for pattern, category, template in _EXTRACT_CATEGORIES:
+                match = pattern.search(content)
+                if match:
+                    groups = [g.strip().rstrip('.,;!') for g in match.groups() if g]
+                    fact = template.format(*groups)
+                    if template == "prefers {0}" and len(groups) > 1:
+                        fact += f" over {groups[1]}"
                     try:
-                        self._store.add_fact(content[:400], category=category)
+                        self._store.add_fact(fact[:200], category=category)
                         extracted += 1
                     except Exception:
                         pass
+                    break
         if extracted:
             logger.info("Auto-extracted %d facts from conversation", extracted)
 
