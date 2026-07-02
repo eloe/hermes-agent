@@ -303,6 +303,8 @@ _MEMORY_REVIEW_PROMPT = (
     "personal details worth remembering?\n"
     "2. Has the user expressed expectations about how you should behave, their work style, or ways "
     "they want you to operate?\n\n"
+    "Never save secret values, tokens, passwords, private keys, or raw configuration values. "
+    "Store only secret-manager locations such as 1Password vault/item/field references. "
     "If something stands out, save it using the memory tool. If nothing is worth saving, just say "
     "'Nothing to save.' and stop."
 )

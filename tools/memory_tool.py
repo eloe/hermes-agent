@@ -236,7 +236,9 @@ MEMORY_SCHEMA = {
         "notes (environment, conventions, tool quirks, lessons).\n\n"
         "SKIP: trivial/obvious info, easily re-discovered facts, raw data dumps, task progress, "
         "completed-work logs, temporary TODO state (use session_search for those). Reusable "
-        "procedures belong in a skill, not memory."
+        "procedures belong in a skill, not memory. Never save secret values, API keys, tokens, "
+        "OAuth material, passwords, private keys, connection strings, or raw .env/config values; "
+        "store only secret-manager locations such as 1Password vault/item/field references."
     ),
     "parameters": {
         "type": "object",

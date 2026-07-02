@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from utils import atomic_write_text
 from tools.threat_patterns import first_threat_message as _first_threat_message
+from tools.durable_write_guard import guard_or_error as _durable_write_guard_error
 
 logger = logging.getLogger("tools.memory_tool")
 
@@ -25,7 +26,8 @@ ENTRY_DELIMITER = "\n§\n"
 def _scan_memory_content(content: str) -> Optional[str]:
     """Error string if *content* matches injection/exfil patterns. Strict scope:
     memory enters the system prompt, so a poisoned entry persists across sessions."""
-    return _first_threat_message(content, scope="strict")
+    return _first_threat_message(content, scope="strict") or _durable_write_guard_error(
+        content, surface="memory_tool", store_name="Memory")
 
 
 def _error(message: str, **extra) -> Dict[str, Any]:

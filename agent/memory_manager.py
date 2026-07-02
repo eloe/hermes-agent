@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider, PRE_COMPRESS_CHECKPOINT_API_VERSION
 from agent.skill_commands import extract_user_instruction_from_skill_message
+from tools.durable_write_guard import scan_text as _scan_durable_write_secret
 from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
@@ -479,6 +480,13 @@ class MemoryManager:
             return
 
         def _sync(provider: MemoryProvider) -> None:
+            guard = _scan_durable_write_secret(
+                "\n".join([user_content or "", assistant_content or ""]),
+                surface=f"MemoryManager.sync_all:{provider.name}",
+            )
+            if not guard.allowed:
+                logger.warning("Memory provider '%s' sync_turn suppressed by durable-write guard", provider.name)
+                return
             kwargs: Dict[str, Any] = {"session_id": session_id}
             if messages is not None and self._provider_sync_accepts_messages(provider):
                 kwargs["messages"] = messages

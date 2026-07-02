@@ -236,6 +236,21 @@ class TestMemoryManager:
 
         assert legacy_provider.synced_turns == [("user", "assistant")]
 
+    def test_sync_all_suppresses_secret_payload_without_user_failure(self, caplog):
+        mgr = MemoryManager()
+        p = FakeMemoryProvider("external")
+        mgr.add_provider(p)
+        fake_secret = "sk-" + "a" * 40
+
+        mgr.sync_all(f"user pasted {fake_secret}", "assistant response")
+        assert mgr.flush_pending(timeout=5) is True
+
+        assert p.synced_turns == []
+        log_text = caplog.text
+        assert "sync_turn suppressed" in log_text
+        assert "openai_key" in log_text
+        assert fake_secret not in log_text
+
     # -- Tool routing -------------------------------------------------------
 
 

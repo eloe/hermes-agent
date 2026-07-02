@@ -5,6 +5,7 @@ import re
 import sqlite3
 import threading
 from pathlib import Path
+from tools.durable_write_guard import guard_or_error as _durable_write_guard_error
 
 from . import holographic as hrr
 
@@ -147,6 +148,9 @@ class MemoryStore:
             content = content.strip()
             if not content:
                 raise ValueError("content must not be empty")
+            guard_error = _durable_write_guard_error(content, surface="fact_store.add_fact", store_name="fact_store")
+            if guard_error:
+                raise ValueError(guard_error)
             try:
                 fact_id: int = self._write("INSERT INTO facts (content, category, tags, trust_score) VALUES (?, ?, ?, ?)",
                                            (content, category, tags, self.default_trust)).lastrowid  # type: ignore[assignment]
@@ -164,6 +168,10 @@ class MemoryStore:
             row = self._one("SELECT fact_id, trust_score FROM facts WHERE fact_id = ?", (fact_id,))
             if row is None:
                 return False
+            if content is not None:
+                guard_error = _durable_write_guard_error(content.strip(), surface="fact_store.update_fact", store_name="fact_store", update=True)
+                if guard_error:
+                    raise ValueError(guard_error)
             changes = {col: val for col, val in {
                 "content": content.strip() if content is not None else None, "tags": tags, "category": category,
                 "trust_score": _clamp_trust(row["trust_score"] + trust_delta) if trust_delta is not None else None,
