@@ -933,7 +933,9 @@ def _reset_for_tests() -> None:
     global _executor, _executor_max_workers
     with _executor_lock:
         if _executor is not None:
-            _executor.shutdown(wait=False)
+            # A non-blocking shutdown lets a prior test's worker enqueue its
+            # completion after the fixture has drained the shared queue.
+            _executor.shutdown(wait=True)
         _executor = None
         _executor_max_workers = 0
     with _records_lock:
