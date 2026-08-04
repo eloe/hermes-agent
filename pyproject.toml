@@ -224,6 +224,10 @@ wake = [
   "openwakeword==0.6.0",
   "onnxruntime==1.27.0",
   "sherpa-onnx==1.13.4",
+  # sherpa-onnx 1.13.4's macOS wheel declares this runtime component but
+  # does not bundle it; without the explicit dependency its native module
+  # cannot load libonnxruntime.
+  "sherpa-onnx-core==1.13.4",
   "sentencepiece==0.2.2",
   "pvporcupine==4.0.3",
   "sounddevice==0.5.5",
