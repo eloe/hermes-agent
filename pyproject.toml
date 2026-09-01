@@ -545,6 +545,7 @@ setuptools = false
 setuptools-rust = false
 wheel = false
 sherpa-onnx = false
+sherpa-onnx-core = false
 slack-bolt = false
 slack-sdk = false
 snowballstemmer = false
