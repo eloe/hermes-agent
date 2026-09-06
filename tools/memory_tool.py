@@ -63,17 +63,24 @@ def load_on_disk_store() -> "MemoryStore":
 
 def _gate_or_stage(summary: str, detail: str, payload: Dict[str, Any]) -> Optional[str]:
     """JSON tool-result string when the write must NOT proceed (blocked or staged
-    for approval), None to proceed. Fails open if the gate module can't load."""
+    for approval), None to proceed. Gate failures never authorize a write."""
     try:
         from tools import write_approval as wa
     except Exception:
-        return None
-    decision = wa.evaluate_gate(wa.MEMORY, inline_summary=summary, inline_detail=detail)
+        return tool_error("Write approval unavailable; no change saved.", success=False)
+    try:
+        decision = wa.evaluate_gate(wa.MEMORY, inline_summary=summary, inline_detail=detail)
+    except Exception:
+        return tool_error("Write approval evaluation failed; no change saved.", success=False)
     if decision.allow:
         return None
     if decision.blocked:
         return tool_error(decision.message, success=False)
-    record = wa.stage_write(wa.MEMORY, payload, summary=f"{summary}: {detail[:120]}", origin=wa.current_origin())
+    try:
+        record = wa.stage_write(wa.MEMORY, payload, summary=f"{summary}: {detail[:120]}", origin=wa.current_origin())
+    except Exception:
+        return tool_error("Could not confirm durable staging; target unchanged. Check pending writes before retrying.",
+                          success=False)
     return json.dumps({"success": True, "staged": True, "pending_id": record["id"], "message": decision.message},
                       ensure_ascii=False)
 

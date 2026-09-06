@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from hermes_constants import get_hermes_home
+from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
 
@@ -36,59 +37,103 @@ _SUBSYSTEMS = (MEMORY, SKILLS)
 # state — to disable a subsystem use its own enable flag (e.g. ``memory.memory_enabled``).
 CONFIG_KEY = "write_approval"
 _TRUTHY_STRINGS = frozenset({"on", "true", "yes", "1", "approve", "enabled"})
+_FALSY_STRINGS = frozenset({"off", "false", "no", "0", "disabled"})
+
+
+class WriteApprovalError(RuntimeError):
+    """Policy or durable approval state could not be established safely."""
+
+
+class PendingWriteClaimed(WriteApprovalError):
+    """A previous approval/rejection owns this record; never replay automatically."""
 
 
 # --- Config resolution ---
 
 def write_approval_enabled(subsystem: str) -> bool:
-    """Read ``<subsystem>.write_approval``; any unset/invalid value means gate off."""
+    """Read a fresh policy snapshot; unavailable/invalid policy must not mean OFF."""
     if subsystem not in _SUBSYSTEMS:
         return False
     try:
         from hermes_cli.config import load_config, cfg_get
-        return _normalize_enabled(cfg_get(load_config(), subsystem, CONFIG_KEY, default=False))
-    except Exception:
-        return False
+        config = load_config(strict=True)
+        if not isinstance(config.get(subsystem), dict):
+            raise ValueError("invalid policy section")
+        return _normalize_enabled(cfg_get(config, subsystem, CONFIG_KEY, default=False))
+    except Exception as exc:
+        raise WriteApprovalError("Write approval policy unavailable or invalid; no change saved.") from exc
 
 
 def _normalize_enabled(value: Any) -> bool:
-    """Coerce a config value to bool; unknown → False (gate off). The string branch
+    """Coerce an explicit boolean; unknown values must not disable approval. The string branch
     covers hand-edited configs (YAML already parses bare on/off/yes/no)."""
     if isinstance(value, bool):
         return value
-    return isinstance(value, str) and value.strip().lower() in _TRUTHY_STRINGS
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUTHY_STRINGS:
+            return True
+        if normalized in _FALSY_STRINGS:
+            return False
+    raise ValueError("write_approval must be a boolean")
 
 
 # --- Pending store (file-backed) ---
 
+def _pending_dir(subsystem: str) -> Path:
+    if subsystem not in _SUBSYSTEMS:
+        raise ValueError("Unknown pending-write subsystem")
+    return get_hermes_home() / "pending" / subsystem
+
+
 def _pending_path(subsystem: str, pending_id: str) -> Path:
-    return get_hermes_home() / "pending" / subsystem / f"{pending_id}.json"
+    if not isinstance(pending_id, str) or not re.fullmatch(r"[0-9a-f]{8,32}", pending_id):
+        raise ValueError("Invalid pending-write identifier")
+    return _pending_dir(subsystem) / f"{pending_id}.json"
+
+
+def _claim_path(subsystem: str, pending_id: str) -> Path:
+    path = _pending_path(subsystem, pending_id)
+    return path.parent / ".claims" / path.name
+
+
+def _sync_directory(path: Path) -> None:
+    # POSIX needs the directory entry durable as well as the file contents.
+    # Windows has no directory-fsync API through os; file handles are still flushed.
+    if os.name == "posix":
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def _prepare_pending_dir(subsystem: str) -> Path:
+    directory = _pending_dir(subsystem)
+    for path in (directory.parent, directory):
+        path.mkdir(mode=0o700, exist_ok=True)
+        _sync_directory(path.parent)
+    return directory
 
 
 def _pending_files(subsystem: str) -> list:
-    d = _pending_path(subsystem, "").parent
+    d = _pending_dir(subsystem)
     return list(d.glob("*.json")) if d.exists() else []
 
 
 def stage_write(subsystem: str, payload: Dict[str, Any], *, summary: str, origin: str) -> Dict[str, Any]:
     """Persist a pending write and return its record (``id`` + metadata). ``payload`` is the exact
     kwargs to replay the write on approval; ``origin`` is ``foreground`` or ``background_review``.
-    Best-effort: on disk failure it logs and still returns a record — the write is lost, which is
-    the safe failure for an approval gate (nothing silently committed)."""
-    pid = uuid.uuid4().hex[:8]
+    Persistence errors propagate: callers must not announce a proposal that was not saved."""
+    pid = uuid.uuid4().hex
     record = {
         "id": pid, "subsystem": subsystem, "action": payload.get("action", ""),
         "summary": (summary or "").strip(), "origin": origin or "foreground",
         "created_at": time.time(), "payload": payload,
     }
-    try:
-        path = _pending_path(subsystem, pid)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, path)
-    except Exception as e:  # pragma: no cover - disk failure path
-        logger.error("Failed to stage pending %s write: %s", subsystem, e, exc_info=True)
+    directory = _prepare_pending_dir(subsystem)
+    atomic_json_write(_pending_path(subsystem, pid), record, mode=0o600)
+    _sync_directory(directory)
     return record
 
 
@@ -97,7 +142,9 @@ def list_pending(subsystem: str) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     for p in _pending_files(subsystem):
         try:
-            records.append(json.loads(p.read_text(encoding="utf-8")))
+            record = _read_pending_record(subsystem, p.stem)
+            record["claimed"] = _claim_path(subsystem, p.stem).exists()
+            records.append(record)
         except Exception:
             logger.warning("Skipping unreadable pending record: %s", p)
     records.sort(key=lambda r: r.get("created_at", 0))
@@ -106,29 +153,65 @@ def list_pending(subsystem: str) -> List[Dict[str, Any]]:
 
 def get_pending(subsystem: str, pending_id: str) -> Optional[Dict[str, Any]]:
     """Return a single pending record by id, or None."""
-    path = _pending_path(subsystem, pending_id)
-    if not path.exists():
-        return None
     with suppress(Exception):
-        return json.loads(path.read_text(encoding="utf-8"))
+        return _read_pending_record(subsystem, pending_id)
     return None
+
+
+def _read_pending_record(subsystem: str, pending_id: str) -> Dict[str, Any]:
+    record = json.loads(_pending_path(subsystem, pending_id).read_text(encoding="utf-8"))
+    if (not isinstance(record, dict) or record.get("id") != pending_id
+            or record.get("subsystem") != subsystem or not isinstance(record.get("payload"), dict)):
+        raise WriteApprovalError("Invalid pending-write record; no change applied.")
+    return record
+
+
+def claim_pending(subsystem: str, pending_id: str, *, operation: str) -> Dict[str, Any]:
+    """Durably consume the right to act on a proposal, across threads/processes.
+
+    Claims are retained even on success. After a crash or partial tool failure the
+    outcome may be uncertain, so neither approve nor reject automatically reclaims it.
+    This is at-most-one automatic attempt, NOT a transaction across the target files.
+    """
+    _read_pending_record(subsystem, pending_id)
+    path = _claim_path(subsystem, pending_id)
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    _sync_directory(path.parent.parent)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise PendingWriteClaimed(
+            "Already claimed; an earlier operation may be active or applied. "
+            "Inspect the target and pending record before manual recovery; do not replay.") from exc
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump({"operation": operation, "claimed_at": time.time()}, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    _sync_directory(path.parent)
+    return _read_pending_record(subsystem, pending_id)
+
+
+def complete_pending(subsystem: str, pending_id: str) -> None:
+    """Remove a claimed proposal but retain its replay-prevention tombstone."""
+    if not _claim_path(subsystem, pending_id).exists():
+        raise WriteApprovalError("Cannot complete an unclaimed proposal.")
+    path = _pending_path(subsystem, pending_id)
+    path.unlink()
+    _sync_directory(path.parent)
 
 
 def discard_pending(subsystem: str, pending_id: str) -> bool:
     """Delete a pending record. Returns True if it existed."""
-    try:
-        path = _pending_path(subsystem, pending_id)
-        if path.exists():
-            path.unlink()
-            return True
-    except Exception as e:  # pragma: no cover
-        logger.error("Failed to discard pending %s/%s: %s", subsystem, pending_id, e)
-    return False
+    if get_pending(subsystem, pending_id) is None:
+        return False
+    claim_pending(subsystem, pending_id, operation="reject")
+    complete_pending(subsystem, pending_id)
+    return True
 
 
 def pending_count(subsystem: str) -> int:
     """Cheap count of pending records (for notification badges)."""
-    d = _pending_path(subsystem, "").parent
+    d = _pending_dir(subsystem)
     if not d.exists():
         return 0
     with suppress(Exception):
@@ -171,8 +254,12 @@ def evaluate_gate(subsystem: str, *, inline_summary: str = "", inline_detail: st
     """Decide what to do with a pending write: gate off → allow; gate on + skills (any origin) or
     background → stage; gate on + memory + foreground → inline prompt when an interactive channel
     exists, else stage. The gate only ever delays a write, never silently refuses it; ``blocked``
-    is produced only when the user actively denies the inline prompt."""
-    if not write_approval_enabled(subsystem):
+    also covers unavailable or invalid policy, which must not authorize a write."""
+    try:
+        enabled = write_approval_enabled(subsystem)
+    except WriteApprovalError as exc:
+        return GateDecision(blocked=True, message=str(exc))
+    if not enabled:
         return GateDecision(allow=True)
     # Skills are too big to review inline; a background write runs in a daemon thread with no user.
     if subsystem == SKILLS or current_origin() == "background_review":

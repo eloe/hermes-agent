@@ -580,19 +580,26 @@ _skill_gate_bypass: "_ctxvars.ContextVar[bool]" = _ctxvars.ContextVar(
 
 def _run_write_gate(build_staging):
     """Shared write gate: None to proceed, else a JSON tool result (blocked/staged).
-    ``build_staging(wa) -> (payload, gist)`` runs only when staging. Fails open if
-    write_approval cannot be imported."""
+    ``build_staging(wa) -> (payload, gist)`` runs only when staging. Gate failures
+    never authorize a write."""
     try:
         from tools import write_approval as wa
     except Exception:
-        return None  # fail open
-    decision = wa.evaluate_gate(wa.SKILLS)
+        return tool_error("Write approval unavailable; no change saved.", success=False)
+    try:
+        decision = wa.evaluate_gate(wa.SKILLS)
+    except Exception:
+        return tool_error("Write approval evaluation failed; no change saved.", success=False)
     if decision.allow:
         return None
     if decision.blocked:
         return tool_error(decision.message, success=False)
     payload, gist = build_staging(wa)
-    record = wa.stage_write(wa.SKILLS, payload, summary=gist, origin=wa.current_origin())
+    try:
+        record = wa.stage_write(wa.SKILLS, payload, summary=gist, origin=wa.current_origin())
+    except Exception:
+        return tool_error("Could not confirm durable staging; target unchanged. Check pending writes before retrying.",
+                          success=False)
     return json.dumps({"success": True, "staged": True, "pending_id": record["id"],
                        "gist": gist, "message": decision.message}, ensure_ascii=False)
 

@@ -10,7 +10,10 @@ from tools import write_approval as wa
 
 
 def _fmt_state(subsystem: str) -> str:
-    on = wa.write_approval_enabled(subsystem)
+    try:
+        on = wa.write_approval_enabled(subsystem)
+    except wa.WriteApprovalError:
+        return f"{subsystem}.write_approval unavailable; writes are blocked until policy is readable."
     return f"{subsystem}.write_approval = {'on' if on else 'off'}"
 
 
@@ -22,6 +25,8 @@ def _fmt_pending_list(subsystem: str) -> str:
     for r in records:
         origin = r.get("origin", "foreground")
         tag = " [auto]" if origin == "background_review" else ""
+        if r.get("claimed"):
+            tag += " [claimed — inspect before manual recovery; do not replay]"
         lines.append(f"  {r['id']}{tag}  {r.get('summary', '')}")
     lines.append("")
     lines.append(f"Apply: /{subsystem} approve <id>   Reject: /{subsystem} reject <id>")
@@ -76,12 +81,25 @@ def _approve(subsystem: str, rest: List[str], memory_store) -> str:
 
     applied, failed = 0, []
     for rec in targets:
+        try:
+            # Explicit approval bypasses prompting, not current configuration validity.
+            wa.write_approval_enabled(subsystem)
+            rec = wa.claim_pending(subsystem, rec["id"], operation="approve")
+        except wa.WriteApprovalError as exc:
+            failed.append(f"{rec['id']}: {exc}")
+            continue
+        except Exception:
+            failed.append(f"{rec['id']}: could not durably claim proposal; no application attempted.")
+            continue
         ok, msg = _apply_one(subsystem, rec, memory_store)
         if ok:
-            wa.discard_pending(subsystem, rec["id"])
             applied += 1
+            try:
+                wa.complete_pending(subsystem, rec["id"])
+            except Exception:
+                failed.append(f"{rec['id']}: applied, but pending cleanup failed; claim retained. Do not replay.")
         else:
-            failed.append(f"{rec['id']}: {msg}")
+            failed.append(f"{rec['id']}: {msg} Claim retained; inspect for partial changes before manual recovery.")
 
     out = [f"Approved {applied} {subsystem} write(s)."]
     if failed:
@@ -101,21 +119,34 @@ def _apply_one(subsystem: str, rec, memory_store):
         else:
             from tools.skill_manager_tool import apply_skill_pending
             result = json.loads(apply_skill_pending(payload))
-        return bool(result.get("success")), result.get("error", "")
-    except Exception as e:
-        return False, str(e)
+        # Tool failures can embed YAML source lines or exception details. The
+        # pending diff is the deliberate review surface, not an error echo.
+        ok = bool(result.get("success"))
+        return ok, "" if ok else "Application did not complete successfully."
+    except Exception:
+        return False, "Application failed; outcome may be partial."
 
 
 def _reject(subsystem: str, rest: List[str]) -> str:
     if not rest:
         return _usage(subsystem)
     target = rest[0]
+    targets = [rec["id"] for rec in wa.list_pending(subsystem)] if target.lower() == "all" else [target]
+    rejected, failed = 0, []
+    for pending_id in targets:
+        try:
+            rejected += bool(wa.discard_pending(subsystem, pending_id))
+        except wa.PendingWriteClaimed as exc:
+            failed.append(f"{pending_id}: {exc}")
+        except Exception:
+            failed.append(f"{pending_id}: rejection failed; inspect pending state before retrying.")
     if target.lower() == "all":
-        n = sum(1 for rec in wa.list_pending(subsystem) if wa.discard_pending(subsystem, rec["id"]))
-        return f"Rejected {n} pending {subsystem} write(s)."
-    if wa.discard_pending(subsystem, target):
-        return f"Rejected pending {subsystem} write '{target}'."
-    return f"No pending {subsystem} write with id '{target}'."
+        out = f"Rejected {rejected} pending {subsystem} write(s)."
+    elif rejected:
+        out = f"Rejected pending {subsystem} write '{target}'."
+    else:
+        out = f"No unclaimed pending {subsystem} write with id '{target}' was rejected."
+    return out + ("\n" + "\n".join(failed) if failed else "")
 
 
 def _diff(rest: List[str]) -> str:

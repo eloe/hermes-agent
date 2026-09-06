@@ -57,10 +57,11 @@ def test_normalize_enabled_coerces_values():
     assert wa._normalize_enabled("on") is True
     assert wa._normalize_enabled("approve") is True
     assert wa._normalize_enabled("true") is True
-    # Everything else → False (gate off is the safe default).
+    # Explicit OFF remains supported; invalid values must not turn protection off.
     assert wa._normalize_enabled("off") is False
-    assert wa._normalize_enabled("garbage") is False
-    assert wa._normalize_enabled(None) is False
+    for value in ("garbage", None):
+        with pytest.raises(ValueError):
+            wa._normalize_enabled(value)
 
 
 # ---------------------------------------------------------------------------
