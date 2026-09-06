@@ -177,7 +177,10 @@ class TestTextOnlyMainSkippedForVision:
 model:
   provider: deepseek
   default: deepseek-v4-pro
+  supports_vision: false
 """)
+        # The routing contract is about a text-only capability, not today's
+        # remote catalog entry for this model. Keep it deterministic offline.
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
         _fresh_modules()
 

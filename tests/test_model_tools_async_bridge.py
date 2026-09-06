@@ -12,6 +12,7 @@ The fix replaces asyncio.run() with a persistent event loop in _run_async().
 
 import asyncio
 import json
+import socket
 import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -351,6 +352,15 @@ class TestVisionDispatchLoopSafety:
     """Simulate the full registry.dispatch('vision_analyze') chain and
     verify the event loop stays alive afterwards — the exact scenario
     from issue #2104."""
+
+    @pytest.fixture(autouse=True)
+    def _public_image_dns(self, monkeypatch):
+        # Keep the real image-source safety path; only the external DNS input is fake.
+        def resolve(host, port, *args, **kwargs):
+            assert host == "example.com", f"unexpected DNS lookup: {host}"
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port or 443))]
+
+        monkeypatch.setattr(socket, "getaddrinfo", resolve)
 
     def test_vision_dispatch_keeps_loop_alive(self, tmp_path):
         """After dispatching vision_analyze via the registry, the event

@@ -239,13 +239,18 @@ class TestInstallCuaDriverUpgrade:
 
         info.assert_not_called()
 
-    def test_quiet_refresh_closes_stdin_and_honors_custom_timeout(self):
+    def test_quiet_refresh_closes_stdin_and_honors_custom_timeout(self, monkeypatch):
         """A background refresh must neither wait on a hidden prompt nor
         inherit the explicit install command's 11-minute ceiling."""
         import subprocess
         from unittest.mock import MagicMock
 
         from hermes_cli import tools_config_cua as tools_config
+
+        # This tests subprocess wiring after a successful unattended preflight,
+        # not the state of the real install lock or GitHub's reachability.
+        monkeypatch.setattr(tools_config, "_cua_install_lock_held", lambda: False)
+        monkeypatch.setattr(tools_config, "_cua_release_endpoint_reachable", lambda: True)
 
         fake_proc = MagicMock()
         fake_proc.pid = 1

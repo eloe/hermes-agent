@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import socket
 from unittest.mock import MagicMock, patch
 
 from tests.tools.conftest import register_all_web_providers
@@ -48,10 +49,16 @@ def test_search_dispatch_maps_search_api_shape():
     }
 
 
-def test_extract_dispatch_snippets_per_url_and_missing_key():
+def test_extract_dispatch_snippets_per_url_and_missing_key(monkeypatch):
     """web_extract on backend=perplexity posts every URL to /sdk/content/snippets;
     a URL the backend failed carries ``error`` instead of content; no key → error, no HTTP."""
     import tools.web_tools as wt
+
+    def resolve(host, port, *args, **kwargs):
+        assert host in {"tokio.rs", "docs.rs"}, f"unexpected DNS lookup: {host}"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port or 443))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
 
     register_all_web_providers()
     urls = ["https://tokio.rs/tokio/tutorial", "https://docs.rs/smol"]

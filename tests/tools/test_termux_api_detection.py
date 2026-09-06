@@ -163,6 +163,8 @@ class TestDetectAudioEnvironmentTermuxFallback:
     ):
         monkeypatch.setenv("TERMUX_VERSION", "0.118.3")
         monkeypatch.setenv("PREFIX", "/data/data/com.termux/files/usr")
+        # The simulated Android/Termux device is not an audio-less container.
+        monkeypatch.setattr("hermes_constants.is_container", lambda: False)
         monkeypatch.delenv("SSH_CLIENT", raising=False)
         monkeypatch.delenv("SSH_TTY", raising=False)
         monkeypatch.delenv("SSH_CONNECTION", raising=False)
@@ -214,6 +216,7 @@ class TestDetectAudioEnvironmentTermuxFallback:
         install hint when the package manager *can* tell us the truth."""
         monkeypatch.setenv("TERMUX_VERSION", "0.118.3")
         monkeypatch.setenv("PREFIX", "/data/data/com.termux/files/usr")
+        monkeypatch.setattr("hermes_constants.is_container", lambda: False)
         monkeypatch.delenv("SSH_CLIENT", raising=False)
         monkeypatch.delenv("SSH_TTY", raising=False)
         monkeypatch.delenv("SSH_CONNECTION", raising=False)

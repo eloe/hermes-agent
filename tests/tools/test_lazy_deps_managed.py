@@ -7,6 +7,7 @@ bootstrapping ensurepip only to fail. ``ensure()`` must fail fast instead.
 """
 
 import pytest
+from unittest.mock import Mock
 
 from tools import lazy_deps
 from tools.lazy_deps import FeatureUnavailable
@@ -37,6 +38,14 @@ def _no_installer(monkeypatch):
     monkeypatch.setattr(lazy_deps.subprocess, "run", _boom)
 
 
+@pytest.fixture
+def failed_installer(monkeypatch):
+    installer = Mock(return_value=lazy_deps._InstallResult(
+        False, "", "simulated installer failure"))
+    monkeypatch.setattr(lazy_deps, "_venv_pip_install", installer)
+    return installer
+
+
 def test_nixos_install_fails_fast_without_touching_the_installer(monkeypatch):
     monkeypatch.setattr("hermes_cli.config.get_managed_system", lambda: "nixos")
     _no_installer(monkeypatch)
@@ -62,7 +71,7 @@ def test_reason_is_classified_as_skipped_not_failed(monkeypatch):
     )
 
 
-def test_unmanaged_install_is_not_blocked_by_the_guard(monkeypatch):
+def test_unmanaged_install_is_not_blocked_by_the_guard(monkeypatch, failed_installer):
     """On a normal pip install the guard must be transparent."""
     monkeypatch.setattr("hermes_cli.config.get_managed_system", lambda: None)
 
@@ -71,9 +80,11 @@ def test_unmanaged_install_is_not_blocked_by_the_guard(monkeypatch):
 
     # Whatever stops the install here, it must NOT be the managed guard.
     assert "managed installs" not in excinfo.value.reason
+    failed_installer.assert_called_once_with(("some-pkg==1.0",))
+    assert "simulated installer failure" in excinfo.value.reason
 
 
-def test_durable_install_target_overrides_the_guard(monkeypatch, tmp_path):
+def test_durable_install_target_overrides_the_guard(monkeypatch, tmp_path, failed_installer):
     """The container deployment sets HERMES_MANAGED *and* a writable target.
 
     Dockerfile sets HERMES_LAZY_INSTALL_TARGET and the NixOS container module
@@ -88,6 +99,8 @@ def test_durable_install_target_overrides_the_guard(monkeypatch, tmp_path):
     assert "nixos" not in excinfo.value.reason.lower(), (
         "durable-target installs must not be blocked by the managed guard"
     )
+    failed_installer.assert_called_once_with(("some-pkg==1.0",))
+    assert "simulated installer failure" in excinfo.value.reason
 
 
 def test_platform_unsupported_takes_precedence(monkeypatch):
@@ -107,7 +120,7 @@ def test_platform_unsupported_takes_precedence(monkeypatch):
     assert excinfo.value.reason == "unsupported on win32"
 
 
-def test_unreadable_config_fails_open(monkeypatch):
+def test_unreadable_config_fails_open(monkeypatch, failed_installer):
     """A broken config must not block installs on a normal pip install."""
     def _raise():
         raise RuntimeError("config unreadable")
@@ -118,3 +131,5 @@ def test_unreadable_config_fails_open(monkeypatch):
         lazy_deps.ensure(FEATURE, prompt=False)
 
     assert "managed" not in excinfo.value.reason.lower()
+    failed_installer.assert_called_once_with(("some-pkg==1.0",))
+    assert "simulated installer failure" in excinfo.value.reason

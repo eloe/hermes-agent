@@ -155,6 +155,9 @@ class TestSnapshotRealProfile:
         import stat
 
         import hermes_cli.browser_connect as bc
+        # This exercises owner-only policy, not the explicit container
+        # volume-sharing exemption. Still use real chmod and file I/O.
+        monkeypatch.setattr("hermes_cli.config._is_container", lambda: False)
         src = self._make_profile(tmp_path / "real")
         home = tmp_path / "hermes-home"
         monkeypatch.setattr(bc, "get_hermes_home", lambda: home)
@@ -181,6 +184,7 @@ class TestSnapshotRealProfile:
         import stat
 
         import hermes_cli.browser_connect as bc
+        monkeypatch.setattr("hermes_cli.config._is_container", lambda: False)
         src = self._make_profile(tmp_path / "real")
         home = tmp_path / "hermes-home"
         monkeypatch.setattr(bc, "get_hermes_home", lambda: home)
@@ -955,20 +959,26 @@ class TestReviewRound3:
         """When there's no reusable session, the overlay DOES run (relaunch)."""
         import tools.browser_tool as bt
         bt._real_profile_cdp_cache.clear()
-        proc = Mock(returncode=0, stdout="", stderr="")
         with patch.object(bt_cloud, "_use_real_profile", return_value=True), \
              patch.object(bt_lightpanda_fallback, "_using_lightpanda_engine", return_value=False), \
              patch("hermes_cli.browser_connect.detect_default_chromium", return_value="chrome"), \
              patch("hermes_cli.browser_connect.real_profile_copy_dir", return_value=str(tmp_path)), \
              patch("hermes_cli.browser_connect.snapshot_real_profile",
                    return_value=(str(tmp_path), None)) as snap, \
+             patch("hermes_cli.browser_connect.chromium_executable",
+                   return_value="/fixture/chrome"), \
              patch.object(bt_real_profile, "_agent_browser_get_cdp",
-                          side_effect=[None, "http://127.0.0.1:9251"]), \
-             patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"), \
-             patch.object(bt.subprocess, "run", return_value=proc), \
+                          return_value=None), \
+             patch.object(bt_real_profile, "_launch_real_profile_chrome",
+                          return_value=(9251, None)) as launch, \
+             patch.object(bt_real_profile, "_attach_agent_browser_to_real_profile",
+                          return_value=("http://127.0.0.1:9251", None)) as attach, \
              patch.object(bt_cloud, "_is_headed_mode", return_value=False):
             cdp, err = bt_real_profile._real_profile_cdp()
         assert err is None
+        assert cdp == "http://127.0.0.1:9251"
+        launch.assert_called_once_with("/fixture/chrome", str(tmp_path))
+        attach.assert_called_once_with(9251, str(tmp_path))
         snap.assert_called_once()
         bt._real_profile_cdp_cache.clear()
 

@@ -90,7 +90,10 @@ def _patch_gateway_discovery():
     Discovery returning nothing makes the phase a clean no-op for every test
     in this module (none of them assert on gateway restarts).
     """
-    with patch("hermes_cli.gateway.find_gateway_pids", return_value=[]), \
+    # A real stale-module purge would discard the mocked gateway module and
+    # rediscover neighboring test processes; this file does not test stale-module purging.
+    with patch("hermes_cli.main._purge_stale_hermes_modules"), \
+         patch("hermes_cli.gateway.find_gateway_pids", return_value=[]), \
          patch("hermes_cli.gateway.supports_systemd_services", return_value=False), \
          patch("hermes_cli.gateway.find_profile_gateway_processes", return_value=[]):
         yield

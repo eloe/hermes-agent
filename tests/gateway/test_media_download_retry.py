@@ -385,6 +385,17 @@ class TestSlackAttachmentDiagnostics:
 # SlackAdapter._download_slack_file
 # ---------------------------------------------------------------------------
 
+@pytest.fixture
+def slack_public_dns(monkeypatch):
+    """Own DNS input while exercising the real Slack URL safety checks."""
+    def resolve(host, port, *args, **kwargs):
+        assert host == "files.slack.com", f"unexpected DNS lookup: {host}"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port or 443))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+
+
+@pytest.mark.usefixtures("slack_public_dns")
 class TestSlackDownloadSlackFile:
     """Tests for SlackAdapter._download_slack_file"""
 
@@ -447,6 +458,7 @@ class TestSlackDownloadSlackFile:
 # SlackAdapter._download_slack_file_bytes
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("slack_public_dns")
 class TestSlackDownloadSlackFileBytes:
     """Tests for SlackAdapter._download_slack_file_bytes"""
 
@@ -556,4 +568,3 @@ class TestMattermostSendUrlAsFile:
         adapter.send.assert_called_once()
         text_arg = adapter.send.call_args[0][1]
         assert "http://cdn.example.com/img.png" in text_arg
-

@@ -620,27 +620,29 @@ class TestClarifyEagerReseed:
         consumer = GatewayStreamConsumer(adapter, "chat-1", cfg)
 
         task = await self._to_reopen_pending(consumer, adapter)
-        seeds_before = len(
-            [f for f in adapter.frames if f["text"] == "" and not f["finalize"]]
-        )
+        try:
+            seeds_before = len(
+                [f for f in adapter.frames if f["text"] == "" and not f["finalize"]]
+            )
 
-        # User answered → request an eager re-seed.  NO on_delta yet.
-        consumer.request_reopen_seed()
-        await self._drain(consumer, 0.05)  # let run() process _REOPEN_SEED
+            # User answered → request an eager re-seed.  NO on_delta yet.
+            consumer.request_reopen_seed()
+            # The consumer also polls every 50 ms; wait for completion rather
+            # than racing its next poll with an equal-duration sleep.
+            assert await self._wait_until(lambda: consumer._native_stream_opened)
 
-        seeds_after = len(
-            [f for f in adapter.frames if f["text"] == "" and not f["finalize"]]
-        )
-        assert seeds_after == seeds_before + 1, (
-            "eager re-seed must emit exactly one new empty seed frame before "
-            f"any delta (before={seeds_before}, after={seeds_after})"
-        )
-        assert await self._wait_until(lambda: consumer._native_stream_opened)
-        assert consumer._awaiting_reopen_after_boundary is False
-        assert consumer._reopen_seeded_eagerly is True
-
-        consumer.finish()
-        await task
+            seeds_after = len(
+                [f for f in adapter.frames if f["text"] == "" and not f["finalize"]]
+            )
+            assert seeds_after == seeds_before + 1, (
+                "eager re-seed must emit exactly one new empty seed frame before "
+                f"any delta (before={seeds_before}, after={seeds_after})"
+            )
+            assert consumer._awaiting_reopen_after_boundary is False
+            assert consumer._reopen_seeded_eagerly is True
+        finally:
+            consumer.finish()
+            await asyncio.wait_for(task, timeout=2.0)
 
     # === POINT 3: no-content wrap-up (hole A) — one finalize, no "✅" ===
 
@@ -1029,52 +1031,54 @@ class TestClarifyEagerReseed:
 
         # 第一轮：boundary → eager seed → 内容。
         task = await self._to_reopen_pending(consumer, adapter)
-        consumer.request_reopen_seed()
-        await self._drain(consumer, 0.05)
-        assert await self._wait_until(lambda: consumer._native_stream_opened)
-        assert consumer._reopen_seeded_eagerly is True
+        try:
+            consumer.request_reopen_seed()
+            assert await self._wait_until(lambda: consumer._native_stream_opened)
+            assert consumer._reopen_seeded_eagerly is True
 
-        consumer.on_delta("根据你的选择，这是后续的完整回答内容，足够长以触发一次流式刷新的补充。")
-        await self._drain(consumer, 0.05)
+            content = "根据你的选择，这是后续的完整回答内容，足够长以触发一次流式刷新的补充。"
+            consumer.on_delta(content)
+            assert await self._wait_until(
+                lambda: any(f["text"] == content and not f["finalize"] for f in adapter.frames)
+            )
 
-        seeds_before_second_boundary = len(
-            [f for f in adapter.frames if f["text"] == "" and not f["finalize"]]
-        )
+            seeds_before_second_boundary = len(
+                [f for f in adapter.frames if f["text"] == "" and not f["finalize"]]
+            )
 
-        # 第二轮 clarify boundary（reopen=True）。
-        boundary = consumer.close_for_approval_prompt(
-            "💬 等待你的选择...", reason="Clarify", reopen=True,
-        )
-        fut = boundary[0] if isinstance(boundary, tuple) else boundary
-        await asyncio.wait_for(fut, timeout=1.0)
+            # 第二轮 clarify boundary（reopen=True）。
+            boundary = consumer.close_for_approval_prompt(
+                "💬 等待你的选择...", reason="Clarify", reopen=True,
+            )
+            fut = boundary[0] if isinstance(boundary, tuple) else boundary
+            await asyncio.wait_for(fut, timeout=1.0)
 
-        # 第二轮 boundary 后：回到 reopen-pending，stream 已关。
-        assert consumer._awaiting_reopen_after_boundary is True
-        assert consumer._native_stream_opened is False
-        assert consumer._use_native_streaming is True
-        # NOTE: 与 task 预期不同 —— 产品代码在 boundary 处理里并不重置
-        # _reopen_seeded_eagerly（见 code-review 观察点 O2：consumer 每 turn 新建，
-        # 残留无害）。这里断言真实行为（残留 True），并在下方证明该残留不会
-        # 导致第二轮 eager seed 误判 —— 链路仍自洽。
-        assert consumer._reopen_seeded_eagerly is True
+            # 第二轮 boundary 后：回到 reopen-pending，stream 已关。
+            assert consumer._awaiting_reopen_after_boundary is True
+            assert consumer._native_stream_opened is False
+            assert consumer._use_native_streaming is True
+            # NOTE: 与 task 预期不同 —— 产品代码在 boundary 处理里并不重置
+            # _reopen_seeded_eagerly（见 code-review 观察点 O2：consumer 每 turn 新建，
+            # 残留无害）。这里断言真实行为（残留 True），并在下方证明该残留不会
+            # 导致第二轮 eager seed 误判 —— 链路仍自洽。
+            assert consumer._reopen_seeded_eagerly is True
 
-        # 第二轮 eager seed：即便标志有残留，仍能正确再次开流。
-        consumer.request_reopen_seed()
-        await self._drain(consumer, 0.05)
+            # 第二轮 eager seed：即便标志有残留，仍能正确再次开流。
+            consumer.request_reopen_seed()
+            assert await self._wait_until(lambda: consumer._native_stream_opened)
 
-        seeds_after = len(
-            [f for f in adapter.frames if f["text"] == "" and not f["finalize"]]
-        )
-        assert seeds_after == seeds_before_second_boundary + 1, (
-            "第二轮 eager seed 必须再发一个新的空 seed 帧 "
-            f"(before={seeds_before_second_boundary}, after={seeds_after})"
-        )
-        assert await self._wait_until(lambda: consumer._native_stream_opened)
-        assert consumer._reopen_seeded_eagerly is True
-        assert consumer._awaiting_reopen_after_boundary is False
-
-        consumer.finish()
-        await task
+            seeds_after = len(
+                [f for f in adapter.frames if f["text"] == "" and not f["finalize"]]
+            )
+            assert seeds_after == seeds_before_second_boundary + 1, (
+                "第二轮 eager seed 必须再发一个新的空 seed 帧 "
+                f"(before={seeds_before_second_boundary}, after={seeds_after})"
+            )
+            assert consumer._reopen_seeded_eagerly is True
+            assert consumer._awaiting_reopen_after_boundary is False
+        finally:
+            consumer.finish()
+            await asyncio.wait_for(task, timeout=2.0)
 
 
 class TestNativeCommentaryPreservesAccumulated:
