@@ -485,7 +485,8 @@ class MemoryManager:
                 surface=f"MemoryManager.sync_all:{provider.name}",
             )
             if not guard.allowed:
-                logger.warning("Memory provider '%s' sync_turn suppressed by durable-write guard", provider.name)
+                logger.warning("Memory provider '%s' sync_turn suppressed by durable-write guard: type=%s",
+                               provider.name, guard.finding.finding_type if guard.finding else "secret_value")
                 return
             kwargs: Dict[str, Any] = {"session_id": session_id}
             if messages is not None and self._provider_sync_accepts_messages(provider):

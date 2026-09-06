@@ -3,6 +3,7 @@
 import pytest
 
 from plugins.memory.holographic.store import MemoryStore
+from plugins.memory.holographic.retrieval import FactRetriever
 
 
 def test_add_fact_blocks_raw_secret_without_echo(tmp_path):
@@ -16,7 +17,7 @@ def test_add_fact_blocks_raw_secret_without_echo(tmp_path):
     assert "secret value" in message
     assert "openai_key" in message
     assert fake_secret not in message
-    assert store.search_facts("OpenAI", min_trust=0.0) == []
+    assert FactRetriever(store).search("OpenAI", min_trust=0.0) == []
 
 
 def test_update_fact_blocks_raw_secret_and_preserves_existing(tmp_path):
@@ -31,7 +32,7 @@ def test_update_fact_blocks_raw_secret_and_preserves_existing(tmp_path):
     assert "secret value" in message
     assert "github_token" in message
     assert fake_secret not in message
-    results = store.search_facts("Safe", min_trust=0.0)
+    results = FactRetriever(store).search("Safe", min_trust=0.0)
     assert [r["content"] for r in results] == ["Safe durable fact"]
 
 
@@ -42,5 +43,5 @@ def test_add_fact_allows_secret_manager_location_reference(tmp_path):
     fact_id = store.add_fact(content)
 
     assert fact_id > 0
-    results = store.search_facts("Fantasy15", min_trust=0.0)
+    results = FactRetriever(store).search("Fantasy15", min_trust=0.0)
     assert [r["content"] for r in results] == [content]

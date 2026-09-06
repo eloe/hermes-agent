@@ -31,7 +31,8 @@ FACT_STORE_SCHEMA = {
         "• probe — Entity recall: ALL facts about a person/thing.\n• related — What connects to an entity? Structural adjacency.\n"
         "• reason — Compositional: facts connected to MULTIPLE entities simultaneously.\n"
         "• contradict — Memory hygiene: find facts making conflicting claims.\n• update/remove/list — CRUD operations.\n\n"
-        "PROMOTION TAGS: use promoted_to_gbrain, transient, and do_not_promote lifecycle tags.\n\n"
+        "PROMOTION TAGS: use promoted_to_gbrain, transient, and do_not_promote lifecycle tags. "
+        "Do not schema-migrate unless tags prove insufficient.\n\n"
         "IMPORTANT: Before answering questions about the user, ALWAYS probe or reason first."
     ),
     "parameters": {
