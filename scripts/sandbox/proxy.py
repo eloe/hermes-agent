@@ -24,6 +24,7 @@ import ssl
 import subprocess
 import sys
 import threading
+import time
 from urllib.parse import unquote, urlsplit
 
 ROOT, CERTS, REAL_CA = map(pathlib.Path, sys.argv[1:])
@@ -31,6 +32,8 @@ ROOT, CERTS, REAL_CA = map(pathlib.Path, sys.argv[1:])
 LISTEN_ADDRESS = ('127.0.0.1', 8080)
 MAX_REQUEST_BYTES = 65536
 UPSTREAM_TIMEOUT_SECONDS = 30
+UPSTREAM_CONNECT_ATTEMPTS = 3
+UPSTREAM_RETRY_DELAYS_SECONDS = (0.25, 0.5)
 CERT_VALIDITY_DAYS = 2
 
 
@@ -152,10 +155,32 @@ def relay(source, destination):
 
 def forward_https(conn, host, port, request):
     context = ssl.create_default_context(cafile=str(REAL_CA))
-    with socket.create_connection((host, port), timeout=UPSTREAM_TIMEOUT_SECONDS) as raw:
-        with context.wrap_socket(raw, server_hostname=host) as upstream:
-            upstream.sendall(close_request(request))
-            relay(upstream, conn)
+    transient_errors = (ConnectionError, TimeoutError, ssl.SSLEOFError)
+    for attempt in range(UPSTREAM_CONNECT_ATTEMPTS):
+        raw = None
+        try:
+            raw = socket.create_connection((host, port), timeout=UPSTREAM_TIMEOUT_SECONDS)
+            upstream = context.wrap_socket(raw, server_hostname=host)
+        except transient_errors as error:
+            if raw is not None:
+                raw.close()
+            if attempt + 1 == UPSTREAM_CONNECT_ATTEMPTS:
+                raise
+            delay = UPSTREAM_RETRY_DELAYS_SECONDS[attempt]
+            print(
+                f'proxy upstream retry {attempt + 1}/{UPSTREAM_CONNECT_ATTEMPTS - 1}: '
+                f'{type(error).__name__}',
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(delay)
+        else:
+            # Only connection and TLS handshake failures retry. Once bytes are
+            # sent upstream, the request may have taken effect.
+            with upstream:
+                upstream.sendall(close_request(request))
+                relay(upstream, conn)
+            return
 
 
 def forward_http(conn, host, port, request, target):
