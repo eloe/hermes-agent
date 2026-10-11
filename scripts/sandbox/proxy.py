@@ -160,7 +160,12 @@ def forward_https(conn, host, port, request):
         raw = None
         try:
             raw = socket.create_connection((host, port), timeout=UPSTREAM_TIMEOUT_SECONDS)
-            upstream = context.wrap_socket(raw, server_hostname=host)
+            try:
+                upstream = context.wrap_socket(raw, server_hostname=host)
+            except Exception:
+                raw.close()
+                raw = None
+                raise
         except transient_errors as error:
             if raw is not None:
                 raw.close()

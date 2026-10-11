@@ -40,22 +40,28 @@ class _Upstream:
 
 
 class _RawSocket:
+    def __init__(self):
+        self.closed = False
+
     def close(self):
-        pass
+        self.closed = True
 
 
 def test_forward_https_retries_pre_request_tls_eof_then_relays(proxy_module, monkeypatch):
     upstream = _Upstream()
     calls = []
+    raw_sockets = []
 
     def connect(*_args, **_kwargs):
         calls.append('connect')
-        if len(calls) == 1:
-            raise ssl.SSLEOFError(ssl.SSL_ERROR_EOF, 'eof')
-        return _RawSocket()
+        raw = _RawSocket()
+        raw_sockets.append(raw)
+        return raw
 
     class FakeContext:
         def wrap_socket(self, _raw, **_kwargs):
+            if len(raw_sockets) == 1:
+                raise ssl.SSLEOFError(ssl.SSL_ERROR_EOF, 'eof')
             return upstream
 
     monkeypatch.setattr(proxy_module.socket, 'create_connection', connect)
@@ -66,17 +72,19 @@ def test_forward_https_retries_pre_request_tls_eof_then_relays(proxy_module, mon
     proxy_module.forward_https(object(), 'registry.npmjs.org', 443, b'GET / HTTP/1.1\r\n\r\n')
 
     assert calls == ['connect', 0.25, 'connect', 'relay']
+    assert raw_sockets[0].closed
     assert len(upstream.writes) == 1
 
 
 def test_forward_https_does_not_retry_certificate_validation_errors(proxy_module, monkeypatch):
     calls = []
+    raw = _RawSocket()
 
     class FakeContext:
         def wrap_socket(self, _raw, **_kwargs):
             raise ssl.SSLCertVerificationError(1, 'certificate failure')
 
-    monkeypatch.setattr(proxy_module.socket, 'create_connection', lambda *_args, **_kwargs: _RawSocket())
+    monkeypatch.setattr(proxy_module.socket, 'create_connection', lambda *_args, **_kwargs: raw)
     monkeypatch.setattr(proxy_module.ssl, 'create_default_context', lambda **_kwargs: FakeContext())
     monkeypatch.setattr(proxy_module.time, 'sleep', lambda delay: calls.append(delay))
 
@@ -84,6 +92,7 @@ def test_forward_https_does_not_retry_certificate_validation_errors(proxy_module
         proxy_module.forward_https(object(), 'registry.npmjs.org', 443, b'GET / HTTP/1.1\r\n\r\n')
 
     assert calls == []
+    assert raw.closed
 
 
 def test_forward_https_does_not_retry_after_request_bytes_are_sent(proxy_module, monkeypatch):
